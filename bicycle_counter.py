@@ -5,20 +5,9 @@ import imutils
 import dlib
 import cv2
 
-PROTOTXT = 'bicycle_counting/mobilenet_ssd/MobileNetSSD_deploy.prototxt'
-MODEL = 'bicycle_counting/mobilenet_ssd/MobileNetSSD_deploy.caffemodel'
-INPUT = 'bicycle_counting/videos/video_1.mp4'
-CONFIDENCE = 0.4
+INPUT = 'videos/video_1.mp4'
 SKIP_FRAMES = 30
 
-# inicjowanie listy nazw klas ktore MobileNet SSD wykrywa
-CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
-           "bottle", "bus", "car", "cat", "chair", "cow", "diningtable",
-           "dog", "horse", "motorbike", "person", "pottedplant", "sheep",
-           "sofa", "train", "tvmonitor"]
-
-
-net = cv2.dnn.readNetFromCaffe(PROTOTXT, MODEL)
 vs = cv2.VideoCapture(INPUT)
 
 W = None
@@ -30,7 +19,8 @@ trackableObjects = {}
 
 totalFrames = 0
 counter = 0
-
+firstFrame = None
+kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
 # przechodzimy po kazdej klatce filmu
 while True:
     frame = vs.read()
@@ -40,7 +30,7 @@ while True:
         break
 
     frame = imutils.resize(frame, width=500)
-
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     if W is None or H is None:
         (H, W) = frame.shape[:2]
 
@@ -49,29 +39,63 @@ while True:
     if totalFrames % SKIP_FRAMES == 0:
         trackers = []
 
-        blob = cv2.dnn.blobFromImage(frame, 0.007843, (W, H), 127.5)
-        net.setInput(blob)
-        detections = net.forward()
+        cv2.imwrite("output/frame/frame_" + str(totalFrames) + ".jpg", frame)
+        cv2.imwrite("output/gray/gray_" + str(totalFrames) + ".jpg", gray)
 
-        for i in np.arange(0, detections.shape[2]):
-            confidence = detections[0, 0, i, 2]
+        if firstFrame is None:
+            firstFrame = gray
+            continue
 
-            if confidence > CONFIDENCE:
-                index = int(detections[0, 0, i, 1])
+        frameDelta = cv2.absdiff(firstFrame, gray)
+        thresh = cv2.threshold(frameDelta, 5, 255, cv2.THRESH_BINARY)[1]
+        cnts = cv2.findContours(
+            thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cnts = imutils.grab_contours(cnts)
 
-                if CLASSES[index] != "bicycle":
-                    continue
+        cv2.imwrite("output/frameDelta/frameDelta_" + str(totalFrames) + ".jpg", frameDelta)
+        cv2.imwrite("output/thresh/thresh_" + str(totalFrames) + ".jpg", thresh)
 
-                startX = int(detections[0, 0, i, 3] * W)
-                startY = int(detections[0, 0, i, 4] * H)
-                endX = int(detections[0, 0, i, 5] * W)
-                endY = int(detections[0, 0, i, 6] * W)
+        for c in cnts:
+            if cv2.contourArea(c) < 500:
+                continue
 
-                tracker = dlib.correlation_tracker()
-                rect = dlib.rectangle(startX, startY, endX, endY)
-                tracker.start_track(frame, rect)
+            peri = cv2.arcLength(c, True)
+            approx = cv2.approxPolyDP(c, 0.04 * peri, True)
 
-                trackers.append(tracker)
+            if len(approx) != 3:
+                continue
+
+            (x, y, w, h) = cv2.boundingRect(c)
+            detected_circles = cv2.HoughCircles(
+                thresh, cv2.HOUGH_GRADIENT, 1, 20, param1=50, param2=30, minRadius=1, maxRadius=40)
+
+            check = 0
+
+            if detected_circles is not None:
+                detected_circles = np.uint16(np.around(detected_circles))
+
+                for pt in detected_circles[0, :]:
+                    a, b, r = pt[0], pt[1], pt[2]
+
+                    if (a > x and a < x + w) and (b > y and b < y + h):
+                        check += 1
+
+            if check < 2:
+                continue
+
+            startX = int(x)
+            startY = int(y)
+            endX = int((x + w))
+            endY = int((y + h))
+
+            cv2.rectangle(frame, (startX, startY),
+                          (endX, endY), (0, 255, 0), 2)
+
+            tracker = dlib.correlation_tracker()
+            rect = dlib.rectangle(startX, startY, endX, endY)
+            tracker.start_track(frame, rect)
+
+            trackers.append(tracker)
 
     else:
 
@@ -85,6 +109,8 @@ while True:
             endX = int(pos.right())
             endY = int(pos.bottom())
 
+            cv2.rectangle(frame, (startX, startY),
+                          (endX, endY), (0, 255, 0), 2)
             rects.append((startX, startY, endX, endY))
 
     # uzyj "centroid tracker" zeby powiazac stare "object centroids"
@@ -106,6 +132,8 @@ while True:
                 to.counted = True
 
         trackableObjects[objectID] = to
+
+    firstFrame = gray
 
     text = "Counter: {}".format(counter)
     cv2.putText(frame, text, (10, H - 20),
